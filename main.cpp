@@ -1,4 +1,4 @@
-#include "bvh.hpp"
+#include "AccelerationStructures.hpp"
 
 #include <GL/glew.h>
 #include <SDL.h>
@@ -15,6 +15,23 @@
 #include <iostream>
 #include <vector>
 
+class DeltaTime {
+private:
+    std::chrono::time_point<std::chrono::system_clock> m_last;
+
+public:
+    DeltaTime() :
+        m_last(std::chrono::system_clock::now())
+    { }
+
+    float get() {
+        auto now = std::chrono::system_clock::now();
+        float delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last).count() / 1000.0f;
+        m_last = now;
+        return delta;
+    }
+};
+
 class Render {
 private:
 	std::uint32_t m_width;
@@ -30,31 +47,21 @@ private:
 
     Assimp::Importer m_meshImporter;
 
-    std::vector<float> m_geometryPos;
-    GLuint m_ssboGeometryPos;
+    GLuint m_ssboTlasGetAABB;
+    GLuint m_ssboTlasGetGeometry;
+    GLuint m_ssboTlasGetChild;
+    GLuint m_ssboTlasGetPrimitiveId;
+    GLuint m_ssboTlasIsLeaf;
+    GLuint m_ssboTlasGetBlasNodeOffset;
+    GLuint m_ssboTlasGetBlasGeometryOffset;
 
-    std::vector<float> m_geometryNormal;
-    GLuint m_ssboGeometryNormal;
+    GLuint m_ssboBlasGetAABB;
+    GLuint m_ssboBlasGetGeometry;
+    GLuint m_ssboBlasGetChild;
+    GLuint m_ssboBlasGetPrimitiveId;
+    GLuint m_ssboBlasIsLeaf;
 
-    std::vector<float> m_geometryColor;
-    GLuint m_ssboGeometryColor;
-
-    std::vector<bool> m_bvhLeaf;
-    GLuint m_ssboBvhLeaf;
-
-    std::vector<float> m_bvhAABBMin;
-    GLuint m_ssboBvhAABBMin;
-
-    std::vector<float> m_bvhAABBMax;
-    GLuint m_ssboBvhAABBMax;
-
-    std::vector<std::uint32_t> m_bvhChild;
-    GLuint m_ssboBvhChild;
-
-    std::vector<std::uint32_t> m_bvhPrimitive;
-    GLuint m_ssboBvhPrimitive;
-
-    BVH m_bvh;
+    AccelerationStructures m_accels;
     glm::mat4 m_viewInv;
 
 public:
@@ -105,10 +112,15 @@ public:
 		glGetProgramInfoLog(m_program, sizeof(buffer), &errLen, buffer);
 		if (errLen > 0) std::cout << std::string(buffer, buffer + errLen) << std::endl;
 
+        float totalBlasBuildTime = 0.0;
+
         const aiScene* scene = m_meshImporter.ReadFile("sponza.obj", aiProcess_Triangulate);
         for (std::uint32_t meshId = 0; meshId < scene->mNumMeshes; meshId++) {
             const aiMesh* mesh = scene->mMeshes[meshId];
 
+            //bool emissive = (meshId == scene->mNumMeshes - 1);
+
+            std::vector<float> triangles;
             for (std::uint32_t faceId = 0; faceId < mesh->mNumFaces; faceId++) {
                 const aiFace* face = &mesh->mFaces[faceId];
 
@@ -116,54 +128,86 @@ public:
                     std::uint32_t index = face->mIndices[indexId];
 
                     const aiVector3D* vertex = &mesh->mVertices[index];
-                    m_geometryPos.insert(m_geometryPos.end(), {vertex->x, vertex->y, vertex->z, 1.0f});
+                    triangles.insert(triangles.end(), {vertex->x, vertex->y, vertex->z, 1.0f});
 
-                    const aiVector3D* normal = &mesh->mNormals[index];
-                    m_geometryNormal.insert(m_geometryNormal.end(), {normal->x, normal->y, normal->z, 0.0f});
+                    /*const aiVector3D* normal = &mesh->mNormals[index];
+                    m_geometryNormal.insert(m_geometryNormal.end(), {normal->x, normal->y, normal->z, 0.0f});*/
                 }
             }
+            DeltaTime deltaTime;
+            m_accels.addBLAS(triangles);
+            totalBlasBuildTime += deltaTime.get();
         }
-        std::cout << "obj loaded" << std::endl;
+        std::cout << "BLAS built in " << totalBlasBuildTime << " seconds" << std::endl;
 
-        m_bvh.build(m_geometryPos);
+        DeltaTime deltaTime;
+        m_accels.buildTLAS();
+        std::cout << "TLAS built in " << deltaTime.get() << " seconds" << std::endl;
 
-        glGenBuffers(1, &m_ssboGeometryPos);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboGeometryPos);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * m_geometryPos.size(), m_geometryPos.data(), GL_DYNAMIC_DRAW);
+        const auto& tlas = m_accels.getTLAS();
 
-        glGenBuffers(1, &m_ssboGeometryNormal);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboGeometryNormal);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * m_geometryNormal.size(), m_geometryNormal.data(), GL_STATIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasGetAABB);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetAABB);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * tlas.aabbs.size(), tlas.aabbs.data(), GL_DYNAMIC_DRAW);
 
-        glGenBuffers(1, &m_ssboGeometryColor);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboGeometryColor);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * m_geometryColor.size(), m_geometryColor.data(), GL_STATIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasGetGeometry);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetGeometry);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * tlas.geometry.size(), tlas.geometry.data(), GL_DYNAMIC_DRAW);
 
-        const auto& leafs = m_bvh.getLeafs();
-        glGenBuffers(1, &m_ssboBvhLeaf);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBvhLeaf);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * leafs.size(), leafs.data(), GL_DYNAMIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasGetChild);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetChild);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * tlas.children.size(), tlas.children.data(), GL_DYNAMIC_DRAW);
 
-        const auto& aabbMins = m_bvh.getAABBMins();
-        glGenBuffers(1, &m_ssboBvhAABBMin);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBvhAABBMin);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * aabbMins.size(), aabbMins.data(), GL_DYNAMIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasGetPrimitiveId);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetPrimitiveId);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * tlas.primitives.size(), tlas.primitives.data(), GL_DYNAMIC_DRAW);
 
-        const auto& aabbMaxs = m_bvh.getAABBMaxs();
-        glGenBuffers(1, &m_ssboBvhAABBMax);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBvhAABBMax);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * aabbMaxs.size(), aabbMaxs.data(), GL_DYNAMIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasIsLeaf);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasIsLeaf);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * tlas.leafs.size(), tlas.leafs.data(), GL_DYNAMIC_DRAW);
 
-        const auto& childs = m_bvh.getChilds();
-        glGenBuffers(1, &m_ssboBvhChild);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBvhChild);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * childs.size(), childs.data(), GL_DYNAMIC_DRAW);
+        glGenBuffers(1, &m_ssboTlasGetBlasNodeOffset);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetBlasNodeOffset);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * m_accels.getTlasBlasNodeOffsets().size(), m_accels.getTlasBlasNodeOffsets().data(), GL_DYNAMIC_DRAW);
 
-        const auto& primitives = m_bvh.getPrimitives();
-        glGenBuffers(1, &m_ssboBvhPrimitive);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBvhPrimitive);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * primitives.size(), primitives.data(), GL_DYNAMIC_DRAW);
-	}
+        glGenBuffers(1, &m_ssboTlasGetBlasGeometryOffset);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboTlasGetBlasGeometryOffset);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * m_accels.getTlasBlasGeometryOffsets().size(), m_accels.getTlasBlasGeometryOffsets().data(), GL_DYNAMIC_DRAW);
+
+        std::vector<float>         blasAABBs;
+        std::vector<float>         blasGeometry;
+        std::vector<std::uint32_t> blasChildren;
+        std::vector<std::uint32_t> blasPrimitives;
+        std::vector<std::uint32_t> blasLeafs;
+
+        for (const auto& blasBVH : m_accels.getBLAS()) {
+            blasAABBs.insert(blasAABBs.end(), blasBVH.aabbs.begin(), blasBVH.aabbs.end());
+            blasGeometry.insert(blasGeometry.end(), blasBVH.geometry.begin(), blasBVH.geometry.end());
+            blasChildren.insert(blasChildren.end(), blasBVH.children.begin(), blasBVH.children.end());
+            blasPrimitives.insert(blasPrimitives.end(), blasBVH.primitives.begin(), blasBVH.primitives.end());
+            blasLeafs.insert(blasLeafs.end(), blasBVH.leafs.begin(), blasBVH.leafs.end());
+        }
+
+        glGenBuffers(1, &m_ssboBlasGetAABB);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBlasGetAABB);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * blasAABBs.size(), blasAABBs.data(), GL_STATIC_DRAW);
+
+        glGenBuffers(1, &m_ssboBlasGetGeometry);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBlasGetGeometry);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float) * blasGeometry.size(), blasGeometry.data(), GL_STATIC_DRAW);
+
+        glGenBuffers(1, &m_ssboBlasGetChild);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBlasGetChild);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * blasChildren.size(), blasChildren.data(), GL_STATIC_DRAW);
+
+        glGenBuffers(1, &m_ssboBlasGetPrimitiveId);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBlasGetPrimitiveId);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * blasPrimitives.size(), blasPrimitives.data(), GL_STATIC_DRAW);
+
+        glGenBuffers(1, &m_ssboBlasIsLeaf);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_ssboBlasIsLeaf);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(std::uint32_t) * blasLeafs.size(), blasLeafs.data(), GL_STATIC_DRAW);
+    }
 
 	~Render() {
 		glDeleteProgram(m_program);
@@ -173,23 +217,27 @@ public:
 	}
 
     void render(float delta) {
-        std::cout << 1.0f / delta << std::endl;
+        //std::cout << 1.0 / delta << std::endl;
 
-        std::uint32_t workgroupSizeX = 8;
-        std::uint32_t workgroupSizeY = 8;
+		std::uint32_t workgroupSizeX = 8;
+		std::uint32_t workgroupSizeY = 8;
 
         m_timer += delta;
 
 		glUseProgram(m_program);
 		glBindImageTexture(0, m_fboTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_ssboGeometryPos);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_ssboGeometryNormal);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_ssboGeometryColor);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_ssboBvhLeaf);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, m_ssboBvhAABBMin);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, m_ssboBvhAABBMax);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_ssboBvhChild);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, m_ssboBvhPrimitive);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_ssboTlasGetAABB);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_ssboTlasGetGeometry);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_ssboTlasGetChild);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_ssboTlasGetPrimitiveId);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, m_ssboTlasIsLeaf);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, m_ssboTlasGetBlasNodeOffset);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, m_ssboTlasGetBlasGeometryOffset);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 8, m_ssboBlasGetAABB);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, m_ssboBlasGetGeometry);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, m_ssboBlasGetChild);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, m_ssboBlasGetPrimitiveId);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, m_ssboBlasIsLeaf);
         glUniform1f(glGetUniformLocation(m_program, "u_timer"), m_timer);
         glUniformMatrix4fv(glGetUniformLocation(m_program, "u_viewInv"), 1, GL_FALSE, &m_viewInv[0][0]);
         glDispatchCompute((m_width + workgroupSizeX - 1) / workgroupSizeX, (m_height + workgroupSizeY - 1) / workgroupSizeY, 1);
@@ -198,29 +246,14 @@ public:
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, m_fbo);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 		glBlitFramebuffer(0, 0, m_width, m_height, 0, 0, m_width, m_height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+        glFinish();
 	}
 };
 
-class DeltaTime {
-private:
-    std::chrono::time_point<std::chrono::system_clock> m_last;
-
-public:
-    DeltaTime() :
-        m_last(std::chrono::system_clock::now())
-    { }
-
-    float get() {
-        auto now = std::chrono::system_clock::now();
-        float delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last).count() / 1000.0f;
-        m_last = now;
-        return delta;
-    }
-};
-
 int main() {
-    const std::uint32_t width = 1600;
-    const std::uint32_t height = 900;
+    const std::uint32_t width = 800;
+    const std::uint32_t height = 600;
 
 	SDL_Init(SDL_INIT_VIDEO);
 	SDL_Window* window = SDL_CreateWindow("bvh test", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
@@ -228,10 +261,10 @@ int main() {
 	Render render(width, height);
 
     DeltaTime deltaTime;
+    float delta = 0.0f;
 
 	bool running = true;
 	while (running) {
-        float delta = deltaTime.get();
 		SDL_Event e;
 		while (SDL_PollEvent(&e)) {
 			switch (e.type) {
@@ -243,6 +276,8 @@ int main() {
 		}
         render.render(delta);
         SDL_GL_SwapWindow(window);
+
+        delta = deltaTime.get();
     }
 
 	SDL_GL_DeleteContext(glContext);

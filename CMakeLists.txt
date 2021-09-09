@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 project(BvhTest VERSION 1.0)
 
-add_executable(BvhTest main.cpp bvh.cpp bvh.hpp)
+add_executable(BvhTest main.cpp AccelerationStructures.cpp AccelerationStructures.hpp)
 
 find_package(Threads REQUIRED)
 target_link_libraries(BvhTest Threads::Threads)
