@@ -23,6 +23,64 @@ layout(std430,  binding = 10) readonly buffer BlasGetChild              { uint b
 layout(std430,  binding = 11) readonly buffer BlasGetPrimitiveId        { uint blasGetPrimitiveId[];        };
 layout(std430,  binding = 12) readonly buffer BlasIsLeaf                { uint blasIsLeaf[];                };
 
+#define DECLARE_BVH_TRAVERSAL(NAME, GET_CHILD, GET_AABB, IS_LEAF, INTERSECT_FUNCTION) \
+    vec4 NAME(in Ray ray, uint skipId, uint nodeOffset, uint geometryOffset, out uint childId) { \
+        vec4 bestIsec = vec4(0.0, 0.0, 0.0, 1e10); \
+        \
+        uint stack[32]; \
+        uint stackIt = 0; \
+        stack[stackIt++] = NULL; \
+        \
+        uint leftChild = GET_CHILD[nodeOffset]; \
+        while (leftChild != NULL) { \
+            uint rightChild = leftChild + 1; \
+            \
+            vec4 bbMinLeft  = GET_AABB[(nodeOffset + leftChild) * 2 + 0]; \
+            vec4 bbMaxLeft  = GET_AABB[(nodeOffset + leftChild) * 2 + 1]; \
+            vec4 bbMinRight = GET_AABB[(nodeOffset + rightChild) * 2 + 0]; \
+            vec4 bbMaxRight = GET_AABB[(nodeOffset + rightChild) * 2 + 1]; \
+            \
+            vec2 distLeft  = aabbIntersect(ray, bbMinLeft.xyz, bbMaxLeft.xyz); \
+            vec2 distRight = aabbIntersect(ray, bbMinRight.xyz, bbMaxRight.xyz); \
+            \
+            if (distLeft.x <= distLeft.y) { \
+                if (IS_LEAF[nodeOffset + leftChild] > 0) { \
+                    vec4 isec = INTERSECT_FUNCTION(ray, geometryOffset, GET_CHILD[nodeOffset + leftChild], childId); \
+                    if (isec.w >= 0 && isec.w < bestIsec.w && leftChild != skipId) { \
+                        bestIsec = isec; \
+                    } \
+                    leftChild = NULL; \
+                } \
+            } else leftChild = NULL; \
+            \
+            if (distRight.x <= distRight.y) { \
+                if (IS_LEAF[nodeOffset + rightChild] > 0) { \
+                    vec4 isec = INTERSECT_FUNCTION(ray, geometryOffset, GET_CHILD[nodeOffset + rightChild], childId); \
+                    if (isec.w >= 0 && isec.w < bestIsec.w && rightChild != skipId) { \
+                        bestIsec = isec; \
+                    } \
+                    rightChild = NULL; \
+                } \
+            } else rightChild = NULL; \
+            \
+            if (leftChild != NULL) { \
+                if (rightChild != NULL) { \
+                    if (distLeft.x > distRight.x) swap(leftChild, rightChild); \
+                    if (stackIt == 32) break; \
+                    stack[stackIt++] = GET_CHILD[nodeOffset + rightChild]; \
+                } \
+                leftChild = GET_CHILD[nodeOffset + leftChild]; \
+            } else if (rightChild != NULL) { \
+                leftChild = GET_CHILD[nodeOffset + rightChild]; \
+            } else { \
+                leftChild = stack[--stackIt]; \
+            } \
+        } \
+        \
+        bestIsec.w = bestIsec.w == 1e10 ? -1.0 : bestIsec.w; \
+        return bestIsec; \
+    }
+
 vec3 hsv2rgb(vec3 c) {
     vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
     vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
@@ -88,146 +146,30 @@ vec2 aabbIntersect(in Ray ray, vec3 boxMin, vec3 boxMax) {
     return vec2(tNear, tFar);
 };
 
-vec4 blasIntersect(in Ray ray, uint offset, uint leafChild) {
-    uint index = blasGetPrimitiveId[offset + leafChild];
-    vec3 p1 = blasGetGeometry[(offset + index) * 3 + 0].xyz;
-    vec3 p2 = blasGetGeometry[(offset + index) * 3 + 1].xyz;
-    vec3 p3 = blasGetGeometry[(offset + index) * 3 + 2].xyz;
+vec4 intersectBLASLeaf(in Ray ray, uint geometryOffset, uint leafChild, out uint childId) {
+    uint index = blasGetPrimitiveId[geometryOffset + leafChild];
+    vec3 p1 = blasGetGeometry[(geometryOffset + index) * 3 + 0].xyz;
+    vec3 p2 = blasGetGeometry[(geometryOffset + index) * 3 + 1].xyz;
+    vec3 p3 = blasGetGeometry[(geometryOffset + index) * 3 + 2].xyz;
     return triIntersect(ray, p1, p2, p3);
 }
+DECLARE_BVH_TRAVERSAL(intersectBLAS, blasGetChild, blasGetAABB, blasIsLeaf, intersectBLASLeaf)
 
-vec4 intersectRayBLAS(in Ray ray, uint skipId, uint nodeOffset, uint geometryOffset, out uint childId) {
-    vec4 bestIsec = vec4(0.0, 0.0, 0.0, 1e10);
-
-    uint stack[32];
-    uint stackIt = 0;
-
-    stack[stackIt++] = NULL;
-
-    uint leftChild = blasGetChild[nodeOffset];
-    while (leftChild != NULL) {
-        uint rightChild = leftChild + 1;
-
-        vec4 bbMinLeft  = blasGetAABB[(nodeOffset + leftChild) * 2 + 0];
-        vec4 bbMaxLeft  = blasGetAABB[(nodeOffset + leftChild) * 2 + 1];
-        vec4 bbMinRight = blasGetAABB[(nodeOffset + rightChild) * 2 + 0];
-        vec4 bbMaxRight = blasGetAABB[(nodeOffset + rightChild) * 2 + 1];
-
-        vec2 distLeft  = aabbIntersect(ray, bbMinLeft.xyz, bbMaxLeft.xyz);
-        vec2 distRight = aabbIntersect(ray, bbMinRight.xyz, bbMaxRight.xyz);
-
-        if (distLeft.x <= distLeft.y) {
-            if (blasIsLeaf[nodeOffset + leftChild] > 0) {
-                vec4 isec = blasIntersect(ray, geometryOffset, blasGetChild[nodeOffset + leftChild]);
-                if (isec.w >= 0 && isec.w < bestIsec.w && leftChild != skipId) {
-                    childId = leftChild;
-                    bestIsec = isec;
-                }
-                leftChild = NULL;
-            }
-        } else leftChild = NULL;
-
-        if (distRight.x <= distRight.y) {
-            if (blasIsLeaf[nodeOffset + rightChild] > 0) {
-                vec4 isec = blasIntersect(ray, geometryOffset, blasGetChild[nodeOffset + rightChild]);
-                if (isec.w >= 0 && isec.w < bestIsec.w && rightChild != skipId) {
-                    childId = rightChild;
-                    bestIsec = isec;
-                }
-                rightChild = NULL;
-            }
-        } else rightChild = NULL;
-
-        if (leftChild != NULL) {
-            if (rightChild != NULL) {
-                if (distLeft.x > distRight.x) swap(leftChild, rightChild);
-                if (stackIt == 32) break;
-                stack[stackIt++] = blasGetChild[nodeOffset + rightChild];
-            }
-            leftChild = blasGetChild[nodeOffset + leftChild];
-        } else if (rightChild != NULL) {
-            leftChild = blasGetChild[nodeOffset + rightChild];
-        } else {
-            leftChild = stack[--stackIt];
-        }
-    }
-
-    bestIsec.w = bestIsec.w == 1e10 ? -1.0 : bestIsec.w;
-
-    return bestIsec;
-}
-
-vec4 tlasIntersect(in Ray ray, uint leafChild, out uint childId) {
+vec4 intersectTLASLeaf(in Ray ray, uint geometryOffset, uint leafChild, out uint childId) {
     uint index = tlasGetPrimitiveId[leafChild];
     vec3 aabbMin = tlasGetGeometry[index * 2 + 0].xyz;
     vec3 aabbMax = tlasGetGeometry[index * 2 + 1].xyz;
     vec2 isec = aabbIntersect(ray, aabbMin, aabbMax);
     if (isec.x <= isec.y) {
-        return intersectRayBLAS(ray, NULL, tlasGetBlasNodeOffset[index], tlasGetBlasGeometryOffset[index], childId);
+        return intersectBLAS(ray, NULL, tlasGetBlasNodeOffset[index], tlasGetBlasGeometryOffset[index], childId);
     } else {
         return vec4(0.0, 0.0, 0.0, -1.0);
     }
 }
+DECLARE_BVH_TRAVERSAL(intersectTLAS, tlasGetChild, tlasGetAABB, tlasIsLeaf, intersectTLASLeaf)
 
 vec4 intersectRay(in Ray ray, uint skipId, out uint childId) {
-    vec4 bestIsec = vec4(0.0, 0.0, 0.0, 1e10);
-
-    uint stack[32];
-    uint stackIt = 0;
-
-    stack[stackIt++] = NULL;
-
-    uint leftChild = tlasGetChild[0];
-    while (leftChild != NULL) {
-        uint rightChild = leftChild + 1;
-
-        vec4 bbMinLeft  = tlasGetAABB[leftChild * 2 + 0];
-        vec4 bbMaxLeft  = tlasGetAABB[leftChild * 2 + 1];
-        vec4 bbMinRight = tlasGetAABB[rightChild * 2 + 0];
-        vec4 bbMaxRight = tlasGetAABB[rightChild * 2 + 1];
-
-        vec2 distLeft  = aabbIntersect(ray, bbMinLeft.xyz, bbMaxLeft.xyz);
-        vec2 distRight = aabbIntersect(ray, bbMinRight.xyz, bbMaxRight.xyz);
-
-        if (distLeft.x <= distLeft.y) {
-            if (tlasIsLeaf[leftChild] > 0) {
-                vec4 isec = tlasIntersect(ray, tlasGetChild[leftChild], childId);
-                if (isec.w >= 0 && isec.w < bestIsec.w && leftChild != skipId) {
-                    bestIsec = isec;
-                }
-
-                leftChild = NULL;
-            }
-        } else leftChild = NULL;
-
-        if (distRight.x <= distRight.y) {
-            if (tlasIsLeaf[rightChild] > 0) {
-                vec4 isec = tlasIntersect(ray, tlasGetChild[rightChild], childId);
-                if (isec.w >= 0 && isec.w < bestIsec.w && rightChild != skipId) {
-                    bestIsec = isec;
-                }
-
-                rightChild = NULL;
-            }
-        } else rightChild = NULL;
-
-        if (leftChild != NULL) {
-            if (rightChild != NULL) {
-                if (distLeft.x > distRight.x) swap(leftChild, rightChild);
-                if (stackIt == 32) break;
-                stack[stackIt++] = tlasGetChild[rightChild];
-            }
-            leftChild = tlasGetChild[leftChild];
-        } else if (rightChild != NULL) {
-            leftChild = tlasGetChild[rightChild];
-        } else {
-            leftChild = stack[--stackIt];
-        }
-    }
-
-    bestIsec.w = bestIsec.w == 1e10 ? -1.0 : bestIsec.w;
-
-    return bestIsec;
+    return intersectTLAS(ray, skipId, 0, 0, childId);
 }
 
 float rand(vec2 n) {
