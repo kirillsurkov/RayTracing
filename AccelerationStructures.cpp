@@ -14,11 +14,12 @@ void AccelerationStructures::addBLAS(const std::vector<float>& mesh) {
     std::vector<bvh::Triangle<float>> triangles;
     triangles.reserve(mesh.size() / 4);
 
-    for (std::uint32_t i = 0; i < mesh.size(); i += 12) {
+    std::uint32_t stride = 3;
+    for (std::uint32_t i = 0; i < mesh.size(); i += 3 * 4 * stride) {
         triangles.push_back(bvh::Triangle<float>(
-                               bvh::Vector3<float>(mesh[i + 0], mesh[i + 1], mesh[i + 2]),
-                               bvh::Vector3<float>(mesh[i + 4], mesh[i + 5], mesh[i + 6]),
-                               bvh::Vector3<float>(mesh[i + 8], mesh[i + 9], mesh[i + 10])
+                               bvh::Vector3<float>(mesh[i + 4 * stride * 0], mesh[i + 4 * stride * 0 + 1], mesh[i + 4 * stride * 0 + 2]),
+                               bvh::Vector3<float>(mesh[i + 4 * stride * 1], mesh[i + 4 * stride * 1 + 1], mesh[i + 4 * stride * 1 + 2]),
+                               bvh::Vector3<float>(mesh[i + 4 * stride * 2], mesh[i + 4 * stride * 2 + 1], mesh[i + 4 * stride * 2 + 2])
                            ));
     }
 
