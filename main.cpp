@@ -308,7 +308,7 @@ public:
         glFinish();
     }
 
-    std::uint32_t shade(std::uint32_t rayBufferSize) {
+    std::uint32_t shade(std::uint32_t rayBufferSize, std::uint32_t iteration) {
         std::uint32_t workgroupSizeX = 64;
 
         std::uint32_t counter = 0;
@@ -333,6 +333,7 @@ public:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, m_ssboBlasGetChild);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, m_ssboBlasGetPrimitiveId);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, m_ssboBlasIsLeaf);
+        glUniform1ui(glGetUniformLocation(m_programShade->getProgram(), "u_iteration"), iteration);
         glUniform1ui(glGetUniformLocation(m_programShade->getProgram(), "u_raysCount"), rayBufferSize);
         glUniform1f(glGetUniformLocation(m_programShade->getProgram(), "u_timer"), m_timer);
         glDispatchCompute((rayBufferSize + workgroupSizeX - 1) / workgroupSizeX, 1, 1);
@@ -358,7 +359,7 @@ public:
 
         for (std::uint32_t i = 0; i < 2; i++) {
             extend(rays);
-            rays = shade(rays);
+            rays = shade(rays, i);
         }
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, m_fbo);
